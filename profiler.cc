@@ -66,7 +66,7 @@ public:
 		return "???";
 	}
 
-	SymFile(const char *fn, uint64_t baseaddr, uint64_t endaddr, uint64_t offset) {
+	SymFile(const char *fn, uint64_t baseaddr, uint64_t endaddr) {
 		this->filename = fn;
 		this->startaddr = baseaddr;
 		this->endaddr = endaddr;
@@ -88,21 +88,44 @@ public:
 		if (!scn)
 			return;
 
+		std::map<uint64_t, uint64_t, std::greater<uint64_t>> progs;
+		size_t numpgm = 0;
+		elf_getphdrnum(elf, &numpgm);
+		for (unsigned i = 0; i < numpgm; i++) {
+			GElf_Phdr phdr;
+			gelf_getphdr(elf, i, &phdr);
+			// Only load sections are relevant
+			if (phdr.p_type == PT_LOAD)
+				progs[phdr.p_vaddr] = phdr.p_memsz;
+		}
+
 		Elf_Data *data = elf_getdata(scn, NULL);
 		unsigned count = shdr.sh_size / shdr.sh_entsize;
 
 		for (unsigned i = 0; i < count; ++i) {
 			GElf_Sym sym;
 			gelf_getsym(data, i, &sym);
-			if (sym.st_info != STT_FUNC && sym.st_info != STT_OBJECT)
+			unsigned symtype = GELF_ST_TYPE(sym.st_info);
+			if (sym.st_info != STT_FUNC)
 				continue;
 			uint64_t symaddr = sym.st_value;
+			// Find the program section at this address
+			auto it = progs.lower_bound(symaddr);
+			if (it == progs.end())
+				continue;
+			if (symaddr > it->first + it->second)
+				continue;
 			// Calculate the final symbol address
-			uint64_t absaddr = symaddr + baseaddr - offset;
+			uint64_t absaddr = symaddr + baseaddr - it->first;
 			if (absaddr > endaddr)
 				continue;
-			symbols[absaddr] = t_symbol{
-				elf_strptr(elf, shdr.sh_link, sym.st_name), sym.st_size};
+			std::string symname = elf_strptr(elf, shdr.sh_link, sym.st_name);
+			if (symbols.count(absaddr)) {
+				symbols[absaddr].size = std::max(sym.st_size, symbols[absaddr].size);
+				symbols[absaddr].name += " / " + symname;
+			} else {
+				symbols[absaddr] = t_symbol{symname, sym.st_size};
+			}
 		}
 		elf_end(elf);
 		close(fd);
@@ -142,13 +165,13 @@ int main(int argc, char ** argv) {
 	SymDatabase symdb;
 	char line[2048];
 	while (fgets(line, sizeof(line), fd)) {
-		uint64_t startva, endva, offset, foo;
+		uint64_t startva, endva, foffset, foo;
 		char c1, c2, c3, c4, c5, c6, c7, c8;
 		char filen[2048];
 		sscanf(line, "%llx-%llx %c%c%c%c %llx %c%c:%c%c %llu %s",
-			&startva, &endva, &c1, &c2, &c3, &c4, &offset,
+			&startva, &endva, &c1, &c2, &c3, &c4, &foffset,
 			&c5, &c6, &c7, &c8, &foo, filen);
-		symdb.maps.emplace(startva, SymFile(filen, startva, endva, offset));
+		symdb.maps.emplace(startva, SymFile(filen, startva, endva));
 	}
 
 	uint64_t totalsamples = 0;
