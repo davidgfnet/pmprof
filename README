@@ -1,0 +1,14 @@
+
+Poor man's profiler
+
+This is a simple sort of proof-of-concept simple profiler I created to get
+a rough idea on what's my program spending time into. It's convenient for
+programs and environments that are hard/inconvenient to debug.
+
+It works by ptrace'ing the process and sampling the program counter. For this
+reason it is only suitable (or mostly) for programs that use a significant
+amount of CPU, otherwise you will just get a lot of libc read/write symbols
+where the program sits waiting for I/O.
+
+Just use it like ./profiler PID and Ctrl-C it to get some results.
+
