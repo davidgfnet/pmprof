@@ -106,7 +106,7 @@ public:
 			GElf_Sym sym;
 			gelf_getsym(data, i, &sym);
 			unsigned symtype = GELF_ST_TYPE(sym.st_info);
-			if (sym.st_info != STT_FUNC)
+			if (symtype != STT_FUNC)
 				continue;
 			uint64_t symaddr = sym.st_value;
 			// Find the program section at this address
