@@ -30,9 +30,17 @@
 #include <string>
 
 #ifdef __x86_64__
-#define GetPC(regs) (uint64_t)((regs).rip)
+  #define REG_CONTEXT_TYPE struct user_regs_struct
+  #define GetPC(regs) (uint64_t)((regs).rip)
 #elif defined(__i386__) || defined(i386)
-#define GetPC(regs) (uint32_t)((regs).eip)
+  #define REG_CONTEXT_TYPE struct user_regs_struct
+  #define GetPC(regs) (uint32_t)((regs).eip)
+#elif defined(__aarch64__)
+  #define REG_CONTEXT_TYPE struct user_regs_struct
+  #define GetPC(regs) (uint64_t)((regs).pc)
+#elif defined(__arm__)
+  #define REG_CONTEXT_TYPE struct user_regs
+  #define GetPC(regs) (uint32_t)((regs).uregs[15])
 #endif
 
 class SymFile {
@@ -147,7 +155,7 @@ int main(int argc, char ** argv) {
 	std::unordered_map<std::string, uint64_t> samples;
 	ptrace(PTRACE_SEIZE, pid, NULL, NULL);
 	while (working) {
-		struct user_regs_struct regs; 
+		REG_CONTEXT_TYPE regs;
 		ptrace(PTRACE_INTERRUPT, pid, NULL, NULL);
 		while (true) {
 			int stat;
