@@ -72,12 +72,23 @@ public:
 		this->endaddr = endaddr;
 
 		struct stat statbuf;
+		if (stat(fn, &statbuf))
+			return;
+
+		// Only parse real files! There are lots of mem mapped files and weird stuff
+		if (!S_ISREG(statbuf.st_mode))
+			return;
+
 		int fd = open(fn, O_RDONLY, 0);
 		if (fd < 0)
 			return;
 
 		elf_version(EV_CURRENT);
 		Elf *elf = elf_begin(fd, ELF_C_READ, NULL);
+		if (!elf) {
+			close(fd);
+			return;
+		}
 		GElf_Shdr shdr;
 		Elf_Scn *scn = NULL;
 		while ((scn = elf_nextscn(elf, scn)) != NULL) {
@@ -85,8 +96,10 @@ public:
 			if (shdr.sh_type == SHT_SYMTAB)
 				break;
 		}
-		if (!scn)
+		if (!scn) {
+			close(fd);
 			return;
+		}
 
 		std::map<uint64_t, uint64_t, std::greater<uint64_t>> progs;
 		size_t numpgm = 0;
@@ -167,7 +180,7 @@ int main(int argc, char ** argv) {
 	while (fgets(line, sizeof(line), fd)) {
 		uint64_t startva, endva, foffset, foo;
 		char c1, c2, c3, c4, c5, c6, c7, c8;
-		char filen[2048];
+		char filen[2048] = {0};
 		sscanf(line, "%llx-%llx %c%c%c%c %llx %c%c:%c%c %llu %s",
 			&startva, &endva, &c1, &c2, &c3, &c4, &foffset,
 			&c5, &c6, &c7, &c8, &foo, filen);
