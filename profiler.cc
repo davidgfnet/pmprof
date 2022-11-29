@@ -1,5 +1,5 @@
 
-// Copyright 2021 - David Guillen Fandos <david@davidgf.net>
+// Copyright 2022 - David Guillen Fandos <david@davidgf.net>
 // Please assume GPL license unless otherwise specified.
 
 // Poor man's profiler
@@ -23,11 +23,14 @@
 #include <errno.h>
 #include <libelf.h>
 #include <gelf.h>
+#include <dirent.h>
 
 #include <iostream>
 #include <map>
+#include <vector>
 #include <unordered_map>
 #include <string>
+#include <cstring>
 
 #ifdef __x86_64__
   #define REG_CONTEXT_TYPE struct user_regs_struct
@@ -165,51 +168,101 @@ void sig_handler(int signo) {
 }
 
 int main(int argc, char ** argv) {
-	pid_t pid = atoi(argv[1]);
+	if (argc <= 1 || !strcmp(argv[1], "-h")) {
+		printf("Usage: %s [-t] [-s us] PID\n", argv[0]);
+		printf("  -t : Only attach to a single thread (default try to attach to all threads)\n");
+		printf("  -s : Sample period (in microseconds), default is 10ms (10.000us)\n");
+		return 1;
+	}
+
+	int sthread = 0, sampleus = 10000;
+	for (unsigned i = 1; i < argc - 1; i++) {
+		if (!strcmp(argv[i], "-t"))
+			sthread = 1;
+		if (!strcmp(argv[i], "-s"))
+			sampleus = atoi(argv[++i]);
+	}
+	pid_t pid = atoi(argv[argc-1]);
 	signal(SIGINT, sig_handler);
 
-	// Parse /proc/maps to get the process memory map
-	char mapfile[128];
-	sprintf(mapfile, "/proc/%u/maps", pid);
-	FILE *fd = fopen(mapfile, "r");
-	if (!fd)
-		return -1;
+	// Get a list of all tasks for this PID
+	std::vector<pid_t> tasks;
+	if (sthread)
+		tasks.push_back(pid);
+	else {
+		std::string tdir = "/proc/" + std::to_string(pid) + "/task";
+		DIR *d = opendir(tdir.c_str());
+		if (d) {
+			struct dirent *entry;
+			while ((entry = readdir(d)) != NULL)
+				if (entry->d_name[0] != '.')
+					tasks.push_back(atoi(entry->d_name));
+			closedir(d);
+		}
+		if (tasks.empty()) {
+			fprintf(stderr, "Could not find tasks at /proc/%u/task\n", pid);
+			return -1;
+		}
+	}
 
-	SymDatabase symdb;
-	char line[2048];
-	while (fgets(line, sizeof(line), fd)) {
-		uint64_t startva, endva, foffset, foo;
-		char c1, c2, c3, c4, c5, c6, c7, c8;
-		char filen[2048] = {0};
-		sscanf(line, "%llx-%llx %c%c%c%c %llx %c%c:%c%c %llu %s",
-			&startva, &endva, &c1, &c2, &c3, &c4, &foffset,
-			&c5, &c6, &c7, &c8, &foo, filen);
-		symdb.maps.emplace(startva, SymFile(filen, startva, endva));
+	// Repeat this for every task ID
+	std::unordered_map<pid_t, SymDatabase> symdbs;
+	for (pid_t taskid : tasks) {
+		// Parse /proc/maps to get the process memory map
+		std::string mapfile = "/proc/" + std::to_string(pid) + "/maps";
+		FILE *fd = fopen(mapfile.c_str(), "r");
+		if (!fd) {
+			fprintf(stderr, "Skipping taskID %u, could not find /proc/%u\n", pid, pid);
+			continue;
+		}
+
+		char line[2048];
+		while (fgets(line, sizeof(line), fd)) {
+			uint64_t startva, endva, foffset, foo;
+			char c1, c2, c3, c4, c5, c6, c7, c8;
+			char filen[2048] = {0};
+			sscanf(line, "%llx-%llx %c%c%c%c %llx %c%c:%c%c %llu %s",
+				&startva, &endva, &c1, &c2, &c3, &c4, &foffset,
+				&c5, &c6, &c7, &c8, &foo, filen);
+			symdbs[taskid].maps.emplace(startva, SymFile(filen, startva, endva));
+		}
+	}
+
+	if (symdbs.empty()) {
+		fprintf(stderr, "Could not load any task, aborting ...\n");
+		return 1;
 	}
 
 	uint64_t totalsamples = 0;
 	std::unordered_map<std::string, uint64_t> samples;
-	ptrace(PTRACE_SEIZE, pid, NULL, NULL);
+	for (pid_t taskid : tasks)
+		ptrace(PTRACE_SEIZE, taskid, NULL, NULL);
+
+	unsigned rr = 0;
 	while (working) {
+		pid_t ctask = tasks[rr];
 		REG_CONTEXT_TYPE regs;
-		ptrace(PTRACE_INTERRUPT, pid, NULL, NULL);
+		ptrace(PTRACE_INTERRUPT, ctask, NULL, NULL);
 		while (true) {
 			int stat;
-			waitpid(pid, &stat, __WALL);
+			waitpid(ctask, &stat, __WALL);
 			if (WIFSTOPPED(stat))
 				break;
 		}
-		if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) >= 0) {
+		if (ptrace(PTRACE_GETREGS, ctask, NULL, &regs) >= 0) {
 			uint64_t pc = GetPC(regs);
-			auto symfile = symdb.findSymFile(pc);
+			auto symfile = symdbs[ctask].findSymFile(pc);
 			std::string symbol = symfile->findSym(pc) + " [" + symfile->filename + "]";
 			samples[symbol]++;
 			totalsamples++;
 		}
-		ptrace(PTRACE_CONT, pid, NULL, NULL);
-		usleep(10*000);
+		ptrace(PTRACE_CONT, ctask, NULL, NULL);
+		usleep(sampleus);
+		rr = (rr + 1) % tasks.size();
 	}
-	ptrace(PTRACE_DETACH, pid, NULL, NULL);
+
+	for (pid_t taskid : tasks)
+		ptrace(PTRACE_DETACH, taskid, NULL, NULL);
 
 	std::map<uint64_t, std::string> osamples;
 	for (auto it : samples)
